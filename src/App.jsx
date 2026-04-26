@@ -200,6 +200,11 @@ function ExerciseScreen({ config, onFinish }) {
   const secs = String(timeLeft % 60).padStart(2, '0')
   const timerWarning = timeLeft <= 10
 
+  const handleStop = () => {
+    clearTimeout(feedbackTimer.current)
+    onFinish(score)
+  }
+
   return (
     <div className="screen exercise-screen">
       <div className="exercise-header">
@@ -209,6 +214,9 @@ function ExerciseScreen({ config, onFinish }) {
         <div className="score-badge">
           ✅ {score.correct} / {score.total}
         </div>
+        <button className="stop-btn" onPointerDown={(e) => { e.preventDefault(); handleStop() }}>
+          ■
+        </button>
       </div>
 
       <div className="question-area">

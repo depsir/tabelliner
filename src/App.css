@@ -67,13 +67,15 @@
   color: var(--text-muted);
   font-size: 1.2rem;
   font-weight: 700;
-  transition: background 0.15s, color 0.15s, transform 0.1s;
+  border: 2px solid transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
 }
 
 .table-btn.active {
-  background: var(--accent);
+  background: rgba(108, 99, 255, 0.18);
   color: #fff;
-  box-shadow: 0 4px 12px rgba(108, 99, 255, 0.4);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .table-btn:active {

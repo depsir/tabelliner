@@ -21,7 +21,7 @@ function shuffle(arr) {
 // ─── screens ───────────────────────────────────────────────────────────────
 
 function SetupScreen({ onStart }) {
-  const [tables, setTables] = useState([2, 3, 4, 5, 6, 7, 8, 9, 10])
+  const [tables, setTables] = useState([])
   const [duration, setDuration] = useState(60)
 
   const toggle = (n) =>

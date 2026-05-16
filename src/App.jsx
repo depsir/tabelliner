@@ -1,5 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
+import { pickMessage } from './lib/copy'
+import {
+  BADGES,
+  applyRunResult,
+  createMissions,
+  evaluateMissions,
+  getComboTier,
+  getLevelInfo,
+  getProfileStats,
+} from './lib/progression'
+import { loadProfile, saveProfile } from './lib/storage'
 
 const TABLES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 const DURATIONS = [
@@ -17,12 +28,12 @@ function randomQuestion(tables) {
   return { a, b, answer: a * b }
 }
 
-function shuffle(arr) {
-  const next = [...arr]
+function shuffle(items) {
+  const next = [...items]
 
-  for (let i = next.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[next[i], next[j]] = [next[j], next[i]]
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1))
+    ;[next[index], next[swapIndex]] = [next[swapIndex], next[index]]
   }
 
   return next
@@ -60,7 +71,121 @@ function getChainChoices(chain, step) {
   return shuffle([correctValue, ...pickRandom([...distractors], 2)])
 }
 
-function SetupScreen({ onStart }) {
+function createGameConfig(baseConfig) {
+  return {
+    ...baseConfig,
+    missions: createMissions(baseConfig),
+  }
+}
+
+function toBaseConfig(config) {
+  return config.mode === 'classic'
+    ? { mode: 'classic', duration: config.duration, tables: config.tables }
+    : { mode: 'chain', chain: config.chain }
+}
+
+function getRunStats(runState) {
+  return {
+    correct: runState.score.correct,
+    total: runState.score.total,
+    maxCombo: runState.maxCombo,
+    correctByTable: runState.correctByTable,
+  }
+}
+
+function getResultEmoji(pct) {
+  if (pct >= 90) {
+    return '🏆'
+  }
+
+  if (pct >= 70) {
+    return '⭐'
+  }
+
+  if (pct >= 50) {
+    return '👍'
+  }
+
+  return '💪'
+}
+
+function getResultMessage(outcome) {
+  const pct = outcome.score.total === 0 ? 0 : Math.round((outcome.score.correct / outcome.score.total) * 100)
+
+  if (outcome.didLevelUp) {
+    return pickMessage('levelUp', '', { level: outcome.levelInfo.level })
+  }
+
+  if (pct >= 90) {
+    return pickMessage('finishGreat')
+  }
+
+  if (pct >= 70) {
+    return pickMessage('finishGood')
+  }
+
+  return pickMessage('finishOk')
+}
+
+function ProfileCard({ profile }) {
+  const levelInfo = getLevelInfo(profile.xp)
+  const stats = getProfileStats(profile)
+  const unlockedBadges = BADGES.filter((badge) => profile.unlockedBadges.includes(badge.id)).slice(-3)
+
+  return (
+    <section className="profile-card">
+      <div className="profile-card-header">
+        <div>
+          <p className="profile-eyebrow">Progressi locali</p>
+          <h2 className="profile-title">Livello {levelInfo.level}</h2>
+        </div>
+        <div className="profile-xp">{profile.xp} XP</div>
+      </div>
+
+      <div className="profile-progress-wrap">
+        <div className="profile-progress-bar" style={{ width: `${levelInfo.progressPercent}%` }} />
+      </div>
+      <p className="profile-progress-label">{levelInfo.remainingXp} XP al prossimo livello</p>
+
+      <div className="profile-stats">
+        <div className="profile-stat">
+          <span className="profile-stat-value">{profile.gamesPlayed}</span>
+          <span className="profile-stat-label">partite</span>
+        </div>
+        <div className="profile-stat">
+          <span className="profile-stat-value">{stats.accuracy}%</span>
+          <span className="profile-stat-label">precisione</span>
+        </div>
+        <div className="profile-stat">
+          <span className="profile-stat-value">{profile.bestCombo}</span>
+          <span className="profile-stat-label">best combo</span>
+        </div>
+        <div className="profile-stat">
+          <span className="profile-stat-value">{profile.streakDays}</span>
+          <span className="profile-stat-label">giorni di fila</span>
+        </div>
+      </div>
+
+      <div className="profile-footer">
+        <p className="profile-footer-text">{stats.completedChains}/10 catene completate almeno una volta</p>
+        {unlockedBadges.length > 0 ? (
+          <div className="badge-row">
+            {unlockedBadges.map((badge) => (
+              <span key={badge.id} className="badge-chip">
+                <span>{badge.icon}</span>
+                {badge.label}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="profile-footer-text muted">Gioca qualche run per iniziare a sbloccare badge.</p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function SetupScreen({ onStart, profile }) {
   const [mode, setMode] = useState('classic')
   const [tables, setTables] = useState([])
   const [chain, setChain] = useState(null)
@@ -89,7 +214,10 @@ function SetupScreen({ onStart }) {
 
   return (
     <div className="screen setup-screen">
-      <h1 className="title">🔢 Tabelline</h1>
+      <h1 className="title">🔢 Tabelliner</h1>
+      <p className="mode-hint">Più combo, più missioni, più motivi per tornare.</p>
+
+      <ProfileCard profile={profile} />
 
       <div className="mode-switch" role="tablist" aria-label="Modalita di gioco">
         <button
@@ -162,6 +290,34 @@ function SetupScreen({ onStart }) {
   )
 }
 
+function MissionList({ missionResults }) {
+  return (
+    <div className="mission-panel">
+      <p className="mission-panel-title">Mini missioni</p>
+      <div className="mission-list">
+        {missionResults.map((mission) => (
+          <div
+            key={mission.id}
+            className={`mission-item ${mission.status.completed ? 'done' : ''} ${mission.status.failed ? 'failed' : ''}`}
+          >
+            <div>
+              <p className="mission-label">{mission.label}</p>
+              <p className="mission-progress">{mission.status.progressText} · +{mission.rewardXp} XP</p>
+            </div>
+            <span className="mission-icon">
+              {mission.status.completed ? '✓' : mission.status.failed ? '✕' : '•'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function FunBanner({ message, tone }) {
+  return <div className={`fun-banner ${tone}`}>{message}</div>
+}
+
 function Numpad({ value, onChange, onSubmit, disabled }) {
   const press = (key) => {
     if (disabled) {
@@ -204,7 +360,7 @@ function Numpad({ value, onChange, onSubmit, disabled }) {
   )
 }
 
-function ExerciseHeader({ score, timeLeft, label, onStop }) {
+function ExerciseHeader({ score, timeLeft, label, onStop, combo, comboTier }) {
   return (
     <div className="exercise-header">
       {timeLeft === undefined ? (
@@ -215,9 +371,16 @@ function ExerciseHeader({ score, timeLeft, label, onStop }) {
           {String(timeLeft % 60).padStart(2, '0')}
         </div>
       )}
-      <div className="score-badge">
-        ✅ {score.correct} / {score.total}
+
+      <div className="header-badges">
+        <div className="score-badge">
+          ✅ {score.correct} / {score.total}
+        </div>
+        <div className={`combo-badge ${combo >= 3 ? 'hot' : ''}`}>
+          🔥 {combo} · x{comboTier.multiplier}
+        </div>
       </div>
+
       <button
         className="stop-btn"
         onPointerDown={(event) => {
@@ -232,15 +395,68 @@ function ExerciseHeader({ score, timeLeft, label, onStop }) {
 }
 
 function ClassicExerciseScreen({ config, onFinish }) {
-  const { tables, duration } = config
-  const [timeLeft, setTimeLeft] = useState(duration)
-  const [question, setQuestion] = useState(() => randomQuestion(tables))
+  const [timeLeft, setTimeLeft] = useState(config.duration)
+  const [question, setQuestion] = useState(() => randomQuestion(config.tables))
   const [input, setInput] = useState('')
   const [feedback, setFeedback] = useState(null)
   const [correctAnswer, setCorrectAnswer] = useState(null)
-  const [score, setScore] = useState({ correct: 0, total: 0 })
+  const [funMessage, setFunMessage] = useState('Prima missione: entrare in ritmo.')
+  const [funTone, setFunTone] = useState('neutral')
+  const [runState, setRunState] = useState({
+    score: { correct: 0, total: 0 },
+    currentCombo: 0,
+    maxCombo: 0,
+    correctByTable: {},
+  })
+  const [missionResults, setMissionResults] = useState(() =>
+    evaluateMissions(config.missions, {
+      correct: 0,
+      total: 0,
+      maxCombo: 0,
+      correctByTable: {},
+    }),
+  )
   const feedbackTimer = useRef(null)
-  const scoreRef = useRef({ correct: 0, total: 0 })
+  const runStateRef = useRef(runState)
+  const completedMissionIdsRef = useRef(new Set())
+  const finishedRef = useRef(false)
+  const lastMessageRef = useRef('')
+
+  const updateMessage = useCallback((category, context, tone) => {
+    const message = pickMessage(category, lastMessageRef.current, context)
+    lastMessageRef.current = message
+    setFunMessage(message)
+    setFunTone(tone)
+  }, [])
+
+  const syncMissions = useCallback((nextState) => {
+    const nextMissionResults = evaluateMissions(config.missions, getRunStats(nextState))
+    let newlyCompletedMission = null
+
+    nextMissionResults.forEach((mission) => {
+      if (mission.status.completed && !completedMissionIdsRef.current.has(mission.id)) {
+        completedMissionIdsRef.current.add(mission.id)
+        newlyCompletedMission = mission
+      }
+    })
+
+    setMissionResults(nextMissionResults)
+    return newlyCompletedMission
+  }, [config.missions])
+
+  const finishRun = useCallback(() => {
+    if (finishedRef.current) {
+      return
+    }
+
+    finishedRef.current = true
+    clearTimeout(feedbackTimer.current)
+    onFinish({
+      score: runStateRef.current.score,
+      maxCombo: runStateRef.current.maxCombo,
+      correctByTable: runStateRef.current.correctByTable,
+    })
+  }, [onFinish])
 
   useEffect(() => {
     const intervalId = setInterval(() => {
@@ -252,38 +468,65 @@ function ClassicExerciseScreen({ config, onFinish }) {
 
   useEffect(() => {
     if (timeLeft === 0) {
-      clearTimeout(feedbackTimer.current)
-      onFinish(scoreRef.current)
+      finishRun()
     }
-  }, [timeLeft, onFinish])
+  }, [finishRun, timeLeft])
 
-  function handleSubmit() {
-    if (!input || feedback) {
+  useEffect(
+    () => () => {
+      clearTimeout(feedbackTimer.current)
+    },
+    [],
+  )
+
+  const handleSubmit = useCallback(() => {
+    if (!input || feedback || timeLeft === 0) {
       return
     }
 
     const isCorrect = Number.parseInt(input, 10) === question.answer
+    const previousState = runStateRef.current
+    const nextCombo = isCorrect ? previousState.currentCombo + 1 : 0
+    const nextState = {
+      score: {
+        correct: previousState.score.correct + (isCorrect ? 1 : 0),
+        total: previousState.score.total + 1,
+      },
+      currentCombo: nextCombo,
+      maxCombo: Math.max(previousState.maxCombo, nextCombo),
+      correctByTable: isCorrect
+        ? {
+            ...previousState.correctByTable,
+            [question.a]: (previousState.correctByTable[question.a] ?? 0) + 1,
+          }
+        : previousState.correctByTable,
+    }
 
-    setScore((prev) => {
-      const next = {
-        correct: prev.correct + (isCorrect ? 1 : 0),
-        total: prev.total + 1,
-      }
-      scoreRef.current = next
-      return next
-    })
-
+    runStateRef.current = nextState
+    setRunState(nextState)
     setFeedback(isCorrect ? 'correct' : 'wrong')
     setCorrectAnswer(question.answer)
-    clearTimeout(feedbackTimer.current)
 
+    const newlyCompletedMission = syncMissions(nextState)
+
+    if (newlyCompletedMission) {
+      updateMessage('mission', { mission: newlyCompletedMission.label }, 'celebrate')
+    } else if (isCorrect && nextState.currentCombo >= 3) {
+      updateMessage('combo', { combo: nextState.currentCombo }, 'celebrate')
+    } else if (isCorrect) {
+      updateMessage('correct', {}, 'success')
+    } else {
+      updateMessage('wrong', {}, 'danger')
+    }
+
+    clearTimeout(feedbackTimer.current)
     feedbackTimer.current = setTimeout(() => {
       setFeedback(null)
       setCorrectAnswer(null)
       setInput('')
-      setQuestion(randomQuestion(tables))
+      setQuestion(randomQuestion(config.tables))
     }, FEEDBACK_DURATION)
-  }
+  }, [config.tables, feedback, input, question.a, question.answer, syncMissions, timeLeft, updateMessage])
 
   useEffect(() => {
     const handler = (event) => {
@@ -295,47 +538,31 @@ function ClassicExerciseScreen({ config, onFinish }) {
         setInput((value) => (value.length < 4 ? value + event.key : value))
       } else if (event.key === 'Backspace') {
         setInput((value) => value.slice(0, -1))
-      } else if (event.key === 'Enter' && input.length > 0) {
-        const isCorrect = Number.parseInt(input, 10) === question.answer
-
-        setScore((prev) => {
-          const next = {
-            correct: prev.correct + (isCorrect ? 1 : 0),
-            total: prev.total + 1,
-          }
-          scoreRef.current = next
-          return next
-        })
-
-        setFeedback(isCorrect ? 'correct' : 'wrong')
-        setCorrectAnswer(question.answer)
-        clearTimeout(feedbackTimer.current)
-
-        feedbackTimer.current = setTimeout(() => {
-          setFeedback(null)
-          setCorrectAnswer(null)
-          setInput('')
-          setQuestion(randomQuestion(tables))
-        }, FEEDBACK_DURATION)
+      } else if (event.key === 'Enter') {
+        handleSubmit()
       }
     }
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [feedback, input, question.answer, tables])
+  }, [feedback, handleSubmit])
+
+  const comboTier = getComboTier(runState.currentCombo)
 
   return (
     <div className="screen exercise-screen">
       <ExerciseHeader
-        score={score}
+        score={runState.score}
         timeLeft={timeLeft}
-        onStop={() => {
-          clearTimeout(feedbackTimer.current)
-          onFinish(scoreRef.current)
-        }}
+        combo={runState.currentCombo}
+        comboTier={comboTier}
+        onStop={finishRun}
       />
 
+      <MissionList missionResults={missionResults} />
+
       <div className="question-area">
+        <FunBanner message={funMessage} tone={funTone} />
         <div className="question">
           {question.a} × {question.b} =
         </div>
@@ -360,47 +587,124 @@ function ClassicExerciseScreen({ config, onFinish }) {
 }
 
 function ChainExerciseScreen({ config, onFinish }) {
-  const { chain } = config
   const [step, setStep] = useState(0)
-  const [choices, setChoices] = useState(() => getChainChoices(chain, 0))
+  const [choices, setChoices] = useState(() => getChainChoices(config.chain, 0))
   const [feedback, setFeedback] = useState(null)
-  const [score, setScore] = useState({ correct: 0, total: 0 })
+  const [funMessage, setFunMessage] = useState('Catena pronta. Facciamola filare liscia.')
+  const [funTone, setFunTone] = useState('neutral')
+  const [runState, setRunState] = useState({
+    score: { correct: 0, total: 0 },
+    currentCombo: 0,
+    maxCombo: 0,
+    correctByTable: {},
+  })
+  const [missionResults, setMissionResults] = useState(() =>
+    evaluateMissions(config.missions, {
+      correct: 0,
+      total: 0,
+      maxCombo: 0,
+      correctByTable: {},
+    }),
+  )
   const feedbackTimer = useRef(null)
-  const scoreRef = useRef({ correct: 0, total: 0 })
+  const runStateRef = useRef(runState)
+  const completedMissionIdsRef = useRef(new Set())
+  const finishedRef = useRef(false)
+  const lastMessageRef = useRef('')
 
-  function handleChoice(choice) {
+  const updateMessage = useCallback((category, context, tone) => {
+    const message = pickMessage(category, lastMessageRef.current, context)
+    lastMessageRef.current = message
+    setFunMessage(message)
+    setFunTone(tone)
+  }, [])
+
+  const syncMissions = useCallback((nextState) => {
+    const nextMissionResults = evaluateMissions(config.missions, getRunStats(nextState))
+    let newlyCompletedMission = null
+
+    nextMissionResults.forEach((mission) => {
+      if (mission.status.completed && !completedMissionIdsRef.current.has(mission.id)) {
+        completedMissionIdsRef.current.add(mission.id)
+        newlyCompletedMission = mission
+      }
+    })
+
+    setMissionResults(nextMissionResults)
+    return newlyCompletedMission
+  }, [config.missions])
+
+  const finishRun = useCallback(() => {
+    if (finishedRef.current) {
+      return
+    }
+
+    finishedRef.current = true
+    clearTimeout(feedbackTimer.current)
+    onFinish({
+      score: runStateRef.current.score,
+      maxCombo: runStateRef.current.maxCombo,
+      correctByTable: runStateRef.current.correctByTable,
+    })
+  }, [onFinish])
+
+  useEffect(
+    () => () => {
+      clearTimeout(feedbackTimer.current)
+    },
+    [],
+  )
+
+  const handleChoice = useCallback((choice) => {
     if (feedback) {
       return
     }
 
-    const correctValue = chain * (step + 1)
+    const correctValue = config.chain * (step + 1)
     const isCorrect = choice === correctValue
+    const previousState = runStateRef.current
+    const nextCombo = isCorrect ? previousState.currentCombo + 1 : 0
+    const nextState = {
+      score: {
+        correct: previousState.score.correct + (isCorrect ? 1 : 0),
+        total: previousState.score.total + 1,
+      },
+      currentCombo: nextCombo,
+      maxCombo: Math.max(previousState.maxCombo, nextCombo),
+      correctByTable: previousState.correctByTable,
+    }
 
-    setScore((prev) => {
-      const next = {
-        correct: prev.correct + (isCorrect ? 1 : 0),
-        total: prev.total + 1,
-      }
-      scoreRef.current = next
-      return next
-    })
-
+    runStateRef.current = nextState
+    setRunState(nextState)
     setFeedback({ selected: choice, correct: correctValue })
-    clearTimeout(feedbackTimer.current)
 
+    const newlyCompletedMission = syncMissions(nextState)
+
+    if (newlyCompletedMission) {
+      updateMessage('mission', { mission: newlyCompletedMission.label }, 'celebrate')
+    } else if (isCorrect && nextState.currentCombo >= 3) {
+      updateMessage('combo', { combo: nextState.currentCombo }, 'celebrate')
+    } else if (isCorrect) {
+      updateMessage('correct', {}, 'success')
+    } else {
+      updateMessage('wrong', {}, 'danger')
+    }
+
+    clearTimeout(feedbackTimer.current)
     feedbackTimer.current = setTimeout(() => {
       const isLastStep = step === CHAIN_STEPS - 1
+
       if (isLastStep) {
-        onFinish(scoreRef.current)
+        finishRun()
         return
       }
 
       const nextStep = step + 1
       setStep(nextStep)
-      setChoices(getChainChoices(chain, nextStep))
+      setChoices(getChainChoices(config.chain, nextStep))
       setFeedback(null)
     }, FEEDBACK_DURATION)
-  }
+  }, [config.chain, feedback, finishRun, step, syncMissions, updateMessage])
 
   useEffect(() => {
     const handler = (event) => {
@@ -413,57 +717,33 @@ function ChainExerciseScreen({ config, onFinish }) {
         const choice = choices[index]
 
         if (choice !== undefined) {
-          const correctValue = chain * (step + 1)
-          const isCorrect = choice === correctValue
-
-          setScore((prev) => {
-            const next = {
-              correct: prev.correct + (isCorrect ? 1 : 0),
-              total: prev.total + 1,
-            }
-            scoreRef.current = next
-            return next
-          })
-
-          setFeedback({ selected: choice, correct: correctValue })
-          clearTimeout(feedbackTimer.current)
-
-          feedbackTimer.current = setTimeout(() => {
-            const isLastStep = step === CHAIN_STEPS - 1
-
-            if (isLastStep) {
-              onFinish(scoreRef.current)
-              return
-            }
-
-            const nextStep = step + 1
-            setStep(nextStep)
-            setChoices(getChainChoices(chain, nextStep))
-            setFeedback(null)
-          }, FEEDBACK_DURATION)
+          handleChoice(choice)
         }
       }
     }
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [chain, choices, feedback, onFinish, step])
+  }, [choices, feedback, handleChoice])
 
-  const currentValues = Array.from({ length: step + 1 }, (_, index) => index * chain)
+  const comboTier = getComboTier(runState.currentCombo)
+  const currentValues = Array.from({ length: step + 1 }, (_, index) => index * config.chain)
 
   return (
     <div className="screen exercise-screen">
       <ExerciseHeader
-        score={score}
-        label={`Catena del ${chain}`}
-        onStop={() => {
-          clearTimeout(feedbackTimer.current)
-          onFinish(scoreRef.current)
-        }}
+        score={runState.score}
+        label={`Catena del ${config.chain}`}
+        combo={runState.currentCombo}
+        comboTier={comboTier}
+        onStop={finishRun}
       />
 
+      <MissionList missionResults={missionResults} />
+
       <div className="question-area">
-        <p className="mode-label">Catena del {chain}</p>
+        <FunBanner message={funMessage} tone={funTone} />
+        <p className="mode-label">Catena del {config.chain}</p>
         <div className="chain-progress">{currentValues.join(' · ')}</div>
         <p className="chain-question">Scegli il prossimo numero</p>
         <div className="chain-choices">
@@ -498,12 +778,12 @@ function ExerciseScreen({ config, onFinish }) {
   return <ClassicExerciseScreen config={config} onFinish={onFinish} />
 }
 
-function ResultsScreen({ score, config, onReplay, onHome }) {
-  const pct = score.total === 0 ? 0 : Math.round((score.correct / score.total) * 100)
-  const emoji = pct >= 90 ? '🏆' : pct >= 70 ? '⭐' : pct >= 50 ? '👍' : '💪'
+function ResultsScreen({ result, config, onReplay, onHome }) {
+  const pct = result.score.total === 0 ? 0 : Math.round((result.score.correct / result.score.total) * 100)
+  const emoji = getResultEmoji(pct)
   const title =
     config.mode === 'chain'
-      ? score.total === CHAIN_STEPS
+      ? result.score.total === CHAIN_STEPS
         ? 'Catena completata!'
         : 'Catena interrotta'
       : 'Tempo scaduto!'
@@ -517,11 +797,12 @@ function ResultsScreen({ score, config, onReplay, onHome }) {
       <div className="results-emoji">{emoji}</div>
       <h1 className="results-title">{title}</h1>
       <p className="results-subtitle">{summary}</p>
+      <p className="results-fun">{result.finalMessage}</p>
 
       <div className="results-score">
         <div className="score-big">
-          {score.correct}
-          <span className="score-total">/{score.total}</span>
+          {result.score.correct}
+          <span className="score-total">/{result.score.total}</span>
         </div>
         <div className="score-label">risposte corrette</div>
       </div>
@@ -530,6 +811,76 @@ function ResultsScreen({ score, config, onReplay, onHome }) {
         <div className="pct-bar" style={{ width: `${pct}%` }} />
       </div>
       <div className="pct-label">{pct}%</div>
+
+      <section className="results-card">
+        <div className="results-card-header">
+          <h2 className="results-card-title">XP guadagnata</h2>
+          <span className="results-card-pill">+{result.rewards.totalXp} XP</span>
+        </div>
+        <div className="reward-breakdown">
+          <span>Base +{result.rewards.baseXp}</span>
+          <span>Combo +{result.rewards.comboXp}</span>
+          <span>Missioni +{result.rewards.missionXp}</span>
+          {result.rewards.perfectChainXp > 0 && <span>Perfect chain +{result.rewards.perfectChainXp}</span>}
+        </div>
+        <p className="results-note">
+          Combo max {result.maxCombo} · stato {result.rewards.comboTier.label} · livello {result.levelInfo.level}
+        </p>
+      </section>
+
+      <section className="results-card">
+        <div className="results-card-header">
+          <h2 className="results-card-title">Missioni</h2>
+          <span className="results-card-pill">{result.completedMissions.length}/{result.missionResults.length}</span>
+        </div>
+        <div className="mission-list compact">
+          {result.missionResults.map((mission) => (
+            <div
+              key={mission.id}
+              className={`mission-item ${mission.status.completed ? 'done' : ''} ${mission.status.failed ? 'failed' : ''}`}
+            >
+              <div>
+                <p className="mission-label">{mission.label}</p>
+                <p className="mission-progress">{mission.status.progressText} · +{mission.rewardXp} XP</p>
+              </div>
+              <span className="mission-icon">
+                {mission.status.completed ? '✓' : mission.status.failed ? '✕' : '•'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {(result.newBadges.length > 0 || result.recordMessages.length > 0) && (
+        <section className="results-card">
+          {result.newBadges.length > 0 && (
+            <>
+              <div className="results-card-header">
+                <h2 className="results-card-title">Nuovi badge</h2>
+                <span className="results-card-pill">{result.newBadges.length}</span>
+              </div>
+              <div className="badge-row">
+                {result.newBadges.map((badge) => (
+                  <span key={badge.id} className="badge-chip big">
+                    <span>{badge.icon}</span>
+                    {badge.label}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+
+          {result.recordMessages.length > 0 && (
+            <div className="record-list">
+              {result.recordMessages.map((message) => (
+                <p key={message} className="results-note">
+                  {message}
+                </p>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="results-actions">
         <button className="start-btn" onClick={onReplay}>🔄 Rigioca</button>
@@ -541,39 +892,57 @@ function ResultsScreen({ score, config, onReplay, onHome }) {
 
 export default function App() {
   const [screen, setScreen] = useState('setup')
+  const [profile, setProfile] = useState(() => loadProfile())
   const [config, setConfig] = useState(null)
-  const [finalScore, setFinalScore] = useState(null)
+  const [result, setResult] = useState(null)
   const [playKey, setPlayKey] = useState(0)
 
-  const handleStart = (nextConfig) => {
-    setConfig(nextConfig)
-    setFinalScore(null)
+  const startRun = (baseConfig) => {
+    setConfig(createGameConfig(baseConfig))
+    setResult(null)
     setPlayKey((value) => value + 1)
     setScreen('playing')
   }
 
   const handleReplay = () => {
-    setFinalScore(null)
-    setPlayKey((value) => value + 1)
-    setScreen('playing')
+    startRun(toBaseConfig(config))
+  }
+
+  const handleFinish = (runResult) => {
+    const outcome = applyRunResult(profile, {
+      config,
+      score: runResult.score,
+      maxCombo: runResult.maxCombo,
+      missions: config.missions,
+      correctByTable: runResult.correctByTable,
+    })
+
+    saveProfile(outcome.profile)
+    setProfile(outcome.profile)
+    setResult({
+      ...runResult,
+      ...outcome,
+      finalMessage: getResultMessage({
+        ...outcome,
+        score: runResult.score,
+      }),
+    })
+    setScreen('results')
   }
 
   return (
     <div className="app">
-      {screen === 'setup' && <SetupScreen onStart={handleStart} />}
+      {screen === 'setup' && <SetupScreen onStart={startRun} profile={profile} />}
       {screen === 'playing' && config && (
         <ExerciseScreen
           key={playKey}
           config={config}
-          onFinish={(score) => {
-            setFinalScore(score)
-            setScreen('results')
-          }}
+          onFinish={handleFinish}
         />
       )}
-      {screen === 'results' && config && finalScore && (
+      {screen === 'results' && config && result && (
         <ResultsScreen
-          score={finalScore}
+          result={result}
           config={config}
           onReplay={handleReplay}
           onHome={() => setScreen('setup')}
